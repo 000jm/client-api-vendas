@@ -71,6 +71,10 @@ function App() {
   const [authMessage, setAuthMessage] = useState('')
   const [authFormError, setAuthFormError] = useState('')
   const [emailValidationError, setEmailValidationError] = useState('')
+  const [passwordValidationError, setPasswordValidationError] = useState('')
+  const [emailLookup, setEmailLookup] = useState(null)
+  const [unknownEmailLoginAttempted, setUnknownEmailLoginAttempted] = useState(false)
+  const [showAuthLoading, setShowAuthLoading] = useState(false)
   const [loginEmail, setLoginEmail] = useState('')
   const [loginPassword, setLoginPassword] = useState('')
   const [profilePassword, setProfilePassword] = useState('')
@@ -78,6 +82,11 @@ function App() {
   const [profileMessage, setProfileMessage] = useState('')
   const [avatarMessage, setAvatarMessage] = useState('')
   const [productForm, setProductForm] = useState({ name: '', price: '', quantity: '' })
+  useEffect(() => {
+    if (!auth.loading) return undefined
+    const timer = setTimeout(() => setShowAuthLoading(true), 180)
+    return () => clearTimeout(timer)
+  }, [auth.loading])
   useEffect(() => {
     if (sections.includes(section)) sessionStorage.setItem('mercado_section', section)
   }, [section])
@@ -102,15 +111,63 @@ function App() {
     return () => clearTimeout(timer)
   }, [query])
   const isDemo = !apiAvailable
-  const rows = isDemo ? demoProducts.filter((item) => item.name.toLowerCase().includes(query.toLowerCase())) : products.items
+  const rows = isDemo ? demoProducts.filter((item) => item.name.toLowerCase().includes(query.toLowerCase())) : (Array.isArray(products.items) ? products.items : [])
   const lowStock = rows.filter((item) => item.quantity > 0 && item.quantity < 10).length
   const outOfStock = rows.filter((item) => item.quantity === 0).length
   const inventoryValue = rows.reduce((sum, item) => sum + item.price * item.quantity, 0)
   const pagination = useMemo(() => ({ page: products.currentPage, last: products.lastPage }), [products.currentPage, products.lastPage])
-  const canOfferRegistration = authMode === 'login' && /(?:credenciais?\s+inv[aá]lid[oa]s?|(?:e-?mail|conta|usu[aá]rio|user).*(?:n[aã]o\s+(?:foi\s+)?encontrad[oa]|inexistente|n[aã]o\s+cadastrad[oa]|does not exist|not found)|(?:n[aã]o\s+(?:foi\s+)?encontrad[oa]|inexistente|n[aã]o\s+cadastrad[oa]|does not exist|not found).*(?:e-?mail|conta|usu[aá]rio|user))/i.test(auth.error)
-  const displayedAuthError = authFormError || (/credenciais?\s+inv[aá]lid[oa]s?/i.test(auth.error)
-    ? 'Não foi possível entrar com esses dados. Confira seu e-mail e sua senha.'
-    : auth.error)
+  const canOfferRegistration = authMode === 'login' && emailLookup?.email === loginEmail.trim().toLowerCase() && emailLookup.exists === false
+  const isInvalidLogin = authMode === 'login' && /invalid credentials|credenciais?\s+inv[aá]lid|confira (?:seu )?e-?mail.*senha|(?:e-?mail|account|conta|user|usu[aá]rio).*(?:not found|does not exist|n[aã]o encontrad[oa]|n[aã]o existe|n[aã]o cadastrad[oa])/i.test(auth.error)
+  const emailLookupMatches = emailLookup?.email === loginEmail.trim().toLowerCase()
+  const displayedEmailError = emailValidationError || (isInvalidLogin && (
+    emailLookupMatches && emailLookup.exists === false
+      ? ''
+      : !emailLookupMatches || emailLookup.exists === null
+        ? 'Confira seu e-mail.'
+        : ''
+  ))
+  const displayedPasswordError = passwordValidationError || (unknownEmailLoginAttempted && emailLookupMatches && emailLookup.exists === false
+    ? 'Esta conta não existe.'
+    : isInvalidLogin && (
+      emailLookupMatches && emailLookup.exists === false
+        ? ''
+        : emailLookupMatches && emailLookup.exists === true
+          ? 'As credenciais não conferem. Confira sua senha e tente novamente.'
+          : 'Confira sua senha.'
+    ))
+  const displayedAuthError = authFormError || (auth.error && !isInvalidLogin ? auth.error : '')
+
+  useEffect(() => {
+    const email = loginEmail.trim()
+    if (!email || isValidEmail(email) || authMode === 'reset') return undefined
+
+    const timer = setTimeout(() => {
+      setEmailValidationError('Digite um endereço de e-mail válido, como voce@exemplo.com.')
+    }, 750)
+
+    return () => clearTimeout(timer)
+  }, [authMode, loginEmail])
+
+  useEffect(() => {
+    const email = loginEmail.trim().toLowerCase()
+    if (authMode !== 'login' || !isValidEmail(email)) return undefined
+
+    let active = true
+    const timer = setTimeout(() => {
+      authApi.checkEmailStatus(email)
+        .then((result) => {
+          if (active) setEmailLookup({ email, exists: result.exists })
+        })
+        .catch(() => {
+          if (active) setEmailLookup({ email, exists: null })
+        })
+    }, 650)
+
+    return () => {
+      active = false
+      clearTimeout(timer)
+    }
+  }, [authMode, loginEmail])
 
   const openNewProduct = () => { setProductForm({ name: '', price: '', quantity: '' }); setDialog({ type: 'product' }) }
   const editProduct = (product) => { setProductForm({ name: product.name, price: String(product.price), quantity: String(product.quantity) }); setDialog({ type: 'product', product }) }
@@ -167,7 +224,10 @@ function App() {
   }
   const submitLogin = async (event) => {
     event.preventDefault()
+    setShowAuthLoading(false)
     setAuthFormError('')
+    setEmailValidationError('')
+    setPasswordValidationError('')
     auth.clearError()
     setAuthMessage('')
 
@@ -183,13 +243,29 @@ function App() {
       return
     }
     if (authMode !== 'reset' && !email) {
-      setAuthFormError(authMode !== 'forgot' && !password
-        ? 'Preencha seu e-mail e sua senha para continuar.'
-        : 'Informe seu e-mail para continuar.')
+      setEmailValidationError('Informe seu e-mail para continuar.')
+      if (authMode !== 'forgot' && !password) setPasswordValidationError('Informe sua senha para continuar.')
       return
     }
+    if (authMode === 'login') {
+      let accountExists = emailLookupMatches ? emailLookup.exists : null
+      if (accountExists === null) {
+        try {
+          const result = await authApi.checkEmailStatus(email.toLowerCase())
+          accountExists = result.exists
+          setEmailLookup({ email: email.toLowerCase(), exists: accountExists })
+        } catch {
+          accountExists = null
+        }
+      }
+      if (accountExists === false) {
+        setUnknownEmailLoginAttempted(true)
+        setPasswordValidationError('Esta conta não existe.')
+        return
+      }
+    }
     if (authMode !== 'forgot' && !password) {
-      setAuthFormError(authMode === 'reset'
+      setPasswordValidationError(authMode === 'reset'
         ? 'Informe sua nova senha para continuar.'
         : 'Informe sua senha para continuar.')
       return
@@ -272,18 +348,17 @@ function App() {
       </div>
       <form className="auth-form" onSubmit={submitLogin} noValidate>
         {authMode === 'register' && <label>Seu nome<input name="name" required placeholder="Como podemos te chamar?" autoComplete="name" onChange={() => setAuthFormError('')}/></label>}
-        {authMode !== 'reset' && <label>E-mail<input name="email" required type="email" value={loginEmail} aria-invalid={Boolean(emailValidationError)} aria-describedby={emailValidationError ? 'email-validation-error' : undefined} onChange={(e) => { const value = e.target.value; setLoginEmail(value); setEmailValidationError(value && !isValidEmail(value) ? 'Digite um endereço de e-mail válido, como voce@exemplo.com.' : ''); setAuthFormError(''); auth.clearError() }} placeholder="voce@exemplo.com" autoComplete="email"/>{emailValidationError && <span className="field-error" id="email-validation-error" role="alert">{emailValidationError}</span>}</label>}
-        {authMode !== 'forgot' && <label>{authMode === 'reset' ? 'Nova senha' : 'Senha'}<input name="password" required type="password" value={loginPassword} onChange={(e) => { setLoginPassword(e.target.value); setAuthFormError(''); auth.clearError() }} placeholder="••••••••" autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}/></label>}
-        {(displayedAuthError || canOfferRegistration) && <div className="auth-feedback"><div className="auth-feedback-content">
-          {displayedAuthError && <div className="error-box" role="alert">{displayedAuthError}</div>}
-          {canOfferRegistration && <div className="registration-prompt"><span>Ainda não tem uma conta? Você pode criar uma agora.</span><button type="button" onClick={() => { setAuthMode('register'); auth.clearError(); setAuthFormError(''); setAuthMessage('') }}>Criar conta</button></div>}
-        </div></div>}
+        {authMode !== 'reset' && <label>E-mail<input name="email" required type="email" value={loginEmail} aria-invalid={Boolean(displayedEmailError)} aria-describedby={displayedEmailError ? 'email-validation-error' : undefined} onChange={(e) => { const value = e.target.value; setLoginEmail(value); setEmailLookup(null); setUnknownEmailLoginAttempted(false); setEmailValidationError(''); setPasswordValidationError(''); setAuthFormError(''); auth.clearError() }} placeholder="voce@exemplo.com" autoComplete="email"/>{displayedEmailError && <span className="field-error" id="email-validation-error" role="alert">{displayedEmailError}</span>}</label>}
+        {canOfferRegistration && <div className="auth-feedback"><div className="auth-feedback-content"><div className="registration-prompt"><span role={unknownEmailLoginAttempted ? 'alert' : 'status'}>E-mail não encontrado. Você pode criar uma conta agora.</span><button type="button" onClick={() => { setAuthMode('register'); setUnknownEmailLoginAttempted(false); auth.clearError(); setAuthFormError(''); setEmailValidationError(''); setPasswordValidationError(''); setAuthMessage('') }}>Criar conta</button></div></div></div>}
+        {authMode !== 'forgot' && <label>{authMode === 'reset' ? 'Nova senha' : 'Senha'}<input name="password" required type="password" value={loginPassword} aria-invalid={Boolean(displayedPasswordError)} aria-describedby={displayedPasswordError ? 'password-validation-error' : undefined} onChange={(e) => { setLoginPassword(e.target.value); setPasswordValidationError(''); setAuthFormError(''); auth.clearError() }} placeholder="••••••••" autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}/>{displayedPasswordError && <div className="auth-feedback" id="password-validation-error"><div className="auth-feedback-content"><span className="login-error-message" role="alert">{displayedPasswordError}</span></div></div>}</label>}
+        {displayedAuthError && <div className="error-box" role="alert">{displayedAuthError}</div>}
         {authMessage && <div className="inline-message">{authMessage}</div>}
-        <button className="button button-primary full" disabled={auth.loading}>{auth.loading ? 'Só um instante…' : authMode === 'register' ? 'Criar conta' : authMode === 'forgot' ? 'Enviar instruções' : authMode === 'reset' ? 'Salvar nova senha' : 'Entrar'} <Icon name="arrow" size={16}/></button>
+        <button className="button button-primary full" disabled={auth.loading} aria-busy={auth.loading}>{auth.loading && showAuthLoading && <><span className="auth-spinner" aria-hidden="true"/>{authMode === 'register' ? 'Criando conta…' : authMode === 'forgot' ? 'Enviando…' : 'Entrando…'}</>}{!auth.loading && <>{authMode === 'register' ? 'Criar conta' : authMode === 'forgot' ? 'Enviar instruções' : authMode === 'reset' ? 'Salvar nova senha' : 'Entrar'} <Icon name="arrow" size={16}/></>}</button>
       </form>
-      {authMode === 'login' && <button className="auth-link" onClick={() => { setAuthMode('forgot'); setEmailValidationError(''); setAuthFormError(''); auth.clearError(); setAuthMessage('') }}>Esqueci minha senha</button>}
-      {(authMode === 'login' || authMode === 'register') && <div className="auth-switch">{authMode === 'register' ? 'Já tem uma conta?' : 'Primeira vez por aqui?'} <button onClick={() => { setAuthMode(authMode === 'register' ? 'login' : 'register'); setEmailValidationError(''); setAuthFormError(''); auth.clearError(); setAuthMessage('') }}>{authMode === 'register' ? 'Fazer login' : 'Criar conta'}</button></div>}
-      {(authMode === 'forgot' || authMode === 'reset') && <button className="auth-link" onClick={() => { setAuthMode('login'); setEmailValidationError(''); setAuthFormError(''); auth.clearError(); setAuthMessage(''); window.history.replaceState({}, '', window.location.pathname) }}>Voltar ao login</button>}
+      {authMode === 'login' && <button className="auth-link" onClick={() => { setAuthMode('forgot'); setEmailLookup(null); setEmailValidationError(''); setPasswordValidationError(''); setAuthFormError(''); auth.clearError(); setAuthMessage('') }}>Esqueci minha senha</button>}
+      {authMode === 'login' && !canOfferRegistration && <div className="auth-switch">Primeira vez por aqui? <button onClick={() => { setAuthMode('register'); auth.clearError(); setAuthFormError(''); setEmailValidationError(''); setPasswordValidationError(''); setAuthMessage('') }}>Criar conta</button></div>}
+      {authMode === 'register' && <div className="auth-switch">Já tem uma conta? <button onClick={() => { setAuthMode('login'); setEmailLookup(null); setEmailValidationError(''); setPasswordValidationError(''); setAuthFormError(''); auth.clearError(); setAuthMessage('') }}>Fazer login</button></div>}
+      {(authMode === 'forgot' || authMode === 'reset') && <button className="auth-link" onClick={() => { setAuthMode('login'); setEmailValidationError(''); setPasswordValidationError(''); setAuthFormError(''); auth.clearError(); setAuthMessage(''); window.history.replaceState({}, '', window.location.pathname) }}>Voltar ao login</button>}
       <button className="auth-link auth-back" onClick={() => setSection('products')}>Voltar ao catálogo</button><p className="login-foot">Feito para cuidar do seu negócio com leveza.</p>
     </div></div>
   </main>

@@ -16,7 +16,13 @@ export const useAuthStore = create((set, get) => ({
       await get().hydrate()
       return true
     } catch (error) {
-      set({ error: error.response?.data?.message || 'Confira seu e-mail e senha.' })
+      const status = error.response?.status
+      const message = error.response?.data?.message || (status === 401
+        ? 'Credenciais inválidas.'
+        : status >= 500 || !error.response
+          ? 'Não foi possível conectar à API agora. Tente novamente em instantes.'
+          : 'Não foi possível entrar com esses dados.')
+      set({ error: message })
       return false
     } finally { set({ loading: false }) }
   },

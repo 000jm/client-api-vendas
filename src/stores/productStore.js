@@ -10,7 +10,14 @@ export const useProductStore = create((set, get) => ({
     set({ loading: true, error: '', ...overrides })
     try {
       const result = await productsApi.list({ page: state.currentPage, per_page: state.perPage, filter: state.filter || undefined, sort: state.sort, sort_dir: state.sortDir })
-      set({ items: result.items, total: result.total, currentPage: result.current_page, perPage: result.per_page, lastPage: result.last_page })
+      const items = Array.isArray(result) ? result : Array.isArray(result?.items) ? result.items : []
+      set({
+        items,
+        total: result?.total ?? items.length,
+        currentPage: result?.current_page ?? state.currentPage,
+        perPage: result?.per_page ?? state.perPage,
+        lastPage: result?.last_page ?? (items.length ? state.currentPage : 0),
+      })
     } catch (error) { set({ error: errorMessage(error) }) }
     finally { set({ loading: false }) }
   },
